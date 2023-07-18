@@ -116,9 +116,7 @@ def interpolate_recursively_from_files(
   num_frames = (n - 1) * (2**(times_to_interpolate) - 1)
   bar = tqdm(total=num_frames, ncols=100, colour='green')
   for i in range(1, n):
-    yield from _recursive_generator(
-        read_image(frames[i - 1]), read_image(frames[i]), times_to_interpolate,
-        interpolator, bar)
+    yield from _recursive_generator(read_image(frames[i - 1]), read_image(frames[i]), times_to_interpolate, interpolator, bar)
   # Separately yield the final frame.
   yield read_image(frames[-1])
 

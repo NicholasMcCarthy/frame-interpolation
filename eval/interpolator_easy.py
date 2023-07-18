@@ -81,21 +81,20 @@ from tqdm.auto import tqdm
 # Controls TF_CCP log level.
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
-
 _PATTERN = flags.DEFINE_string(
-    name='pattern',
+    name='input_dir',
     default=None,
     help='The pattern to determine the directories with the input frames.',
     required=True)
 _MODEL_PATH = flags.DEFINE_string(
     name='model_path',
-    default=None,
+    default='./pretrained_models/film_net/Style/saved_model',
     help='The path of the TF2 saved model to use.')
 _TIMES_TO_INTERPOLATE = flags.DEFINE_integer(
     name='times_to_interpolate',
     default=5,
     help='The number of times to run recursive midpoint interpolation. '
-    'The number of output frames will be 2^times_to_interpolate+1.')
+         'The number of output frames will be 2^times_to_interpolate+1.')
 _FPS = flags.DEFINE_integer(
     name='fps',
     default=30,
@@ -108,92 +107,93 @@ _BLOCK_HEIGHT = flags.DEFINE_integer(
     name='block_height',
     default=1,
     help='An int >= 1, number of patches along height, '
-    'patch_height = height//block_height, should be evenly divisible.')
+         'patch_height = height//block_height, should be evenly divisible.')
 _BLOCK_WIDTH = flags.DEFINE_integer(
     name='block_width',
     default=1,
     help='An int >= 1, number of patches along width, '
-    'patch_width = width//block_width, should be evenly divisible.')    
+         'patch_width = width//block_width, should be evenly divisible.')
 _OUTPUT_VIDEO = flags.DEFINE_boolean(
     name='output_video',
     default=False,
     help='If true, creates a video of the frames in the interpolated_frames/ '
-    'subdirectory')
+         'subdirectory')
 
 # Add other extensions, if not either.
 _INPUT_EXT = ['png', 'jpg', 'jpeg']
 
 
 def _output_frames(frames: List[np.ndarray], frames_dir: str):
-  """Writes PNG-images to a directory.
+    """Writes PNG-images to a directory.
 
-  If frames_dir doesn't exist, it is created. If frames_dir contains existing
-  PNG-files, they are removed before saving the new ones.
+    If frames_dir doesn't exist, it is created. If frames_dir contains existing
+    PNG-files, they are removed before saving the new ones.
 
-  Args:
-    frames: List of images to save.
-    frames_dir: The output directory to save the images.
+    Args:
+      frames: List of images to save.
+      frames_dir: The output directory to save the images.
 
-  """
-  if tf.io.gfile.isdir(frames_dir):
-    old_frames = tf.io.gfile.glob(f'{frames_dir}/frame_*.png')
-    if old_frames:
-      logging.info('Removing existing frames from %s.', frames_dir)
-      for old_frame in old_frames:
-        tf.io.gfile.remove(old_frame)
-  else:
-    tf.io.gfile.makedirs(frames_dir)
-  for idx, frame in tqdm(
-      enumerate(frames), total=len(frames), ncols=100, colour='green'):
-    util.write_image(f'{frames_dir}/frame_{idx:03d}.png', frame)
-  logging.info('Output frames saved in %s.', frames_dir)
+    """
+    if tf.io.gfile.isdir(frames_dir):
+        old_frames = tf.io.gfile.glob(f'{frames_dir}/frame_*.png')
+        if old_frames:
+            logging.info('Removing existing frames from %s.', frames_dir)
+            for old_frame in old_frames:
+                tf.io.gfile.remove(old_frame)
+    else:
+        tf.io.gfile.makedirs(frames_dir)
+    for idx, frame in tqdm(
+            enumerate(frames), total=len(frames), ncols=100, colour='green'):
+        util.write_image(f'{frames_dir}/frame_{idx:03d}.png', frame)
+    logging.info('Output frames saved in %s.', frames_dir)
 
 
 class ProcessDirectory(beam.DoFn):
-  """DoFn for running the interpolator on a single directory at the time."""
+    """DoFn for running the interpolator on a single directory at the time."""
 
-  def setup(self):
-    self.interpolator = interpolator_lib.Interpolator(
-        _MODEL_PATH.value, _ALIGN.value,
-        [_BLOCK_HEIGHT.value, _BLOCK_WIDTH.value])
+    def setup(self):
+        self.interpolator = interpolator_lib.Interpolator(
+            _MODEL_PATH.value, _ALIGN.value,
+            [_BLOCK_HEIGHT.value, _BLOCK_WIDTH.value])
 
-    if _OUTPUT_VIDEO.value:
-      ffmpeg_path = util.get_ffmpeg_path()
-      media.set_ffmpeg(ffmpeg_path)
+        if _OUTPUT_VIDEO.value:
+            ffmpeg_path = util.get_ffmpeg_path()
+            media.set_ffmpeg(ffmpeg_path)
 
-  def process(self, directory: str):
-    input_frames_list = [
-        natsort.natsorted(tf.io.gfile.glob(f'{directory}/*.{ext}'))
-        for ext in _INPUT_EXT
-    ]
-    input_frames = functools.reduce(lambda x, y: x + y, input_frames_list)
-    logging.info('Generating in-between frames for %s.', directory)
-    frames = list(
-        util.interpolate_recursively_from_files(
-            input_frames, _TIMES_TO_INTERPOLATE.value, self.interpolator))
+    def process(self, directory: str):
+        input_frames_list = [
+            natsort.natsorted(tf.io.gfile.glob(f'{directory}/*.{ext}'))
+            for ext in _INPUT_EXT
+        ]
+        input_frames = functools.reduce(lambda x, y: x + y, input_frames_list)
+        logging.info('Generating in-between frames for %s.', directory)
 
+        frames = list(
+            util.interpolate_recursively_from_files(
+                input_frames, _TIMES_TO_INTERPOLATE.value, self.interpolator))
 
-    _output_frames(frames, f'{directory}/interpolated_frames')
-    if _OUTPUT_VIDEO.value:
-      media.write_video(f'{directory}/interpolated.mp4', frames, fps=_FPS.value)
-      logging.info('Output video saved at %s/interpolated.mp4.', directory)
+        _output_frames(frames, f'{directory}/interpolated_frames')
+        if _OUTPUT_VIDEO.value:
+            media.write_video(f'{directory}/interpolated.mp4', frames, fps=_FPS.value)
+            logging.info('Output video saved at %s/interpolated.mp4.', directory)
 
 
 def _run_pipeline() -> None:
-  directories = tf.io.gfile.glob(_PATTERN.value)
-  pipeline = beam.Pipeline('DirectRunner')
-  (pipeline | 'Create directory names' >> beam.Create(directories)  # pylint: disable=expression-not-assigned
-   | 'Process directories' >> beam.ParDo(ProcessDirectory()))
+    directories = tf.io.gfile.glob(_PATTERN.value)
+    pipeline = beam.Pipeline('DirectRunner')
 
-  result = pipeline.run()
-  result.wait_until_finish()
+    (pipeline | 'Create directory names' >> beam.Create(directories)  # pylint: disable=expression-not-assigned
+     | 'Process directories' >> beam.ParDo(ProcessDirectory()))
+
+    result = pipeline.run()
+    result.wait_until_finish()
 
 
 def main(argv: Sequence[str]) -> None:
-  if len(argv) > 1:
-    raise app.UsageError('Too many command-line arguments.')
-  _run_pipeline()
+    if len(argv) > 1:
+        raise app.UsageError('Too many command-line arguments.')
+    _run_pipeline()
 
 
 if __name__ == '__main__':
-  app.run(main)
+    app.run(main)
